@@ -5,6 +5,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import ssl
 import struct
 import time
 from urllib.parse import urljoin, urlsplit
@@ -312,7 +313,17 @@ class ModelDownloads:
         except asyncio.CancelledError:
             job.update(state='cancelled', error='已暂停，点击重试可继续下载。')
         except (ValueError, SafetensorError, OSError, aiohttp.ClientError, asyncio.TimeoutError) as error:
-            if isinstance(error, ValueError):
+            if isinstance(error, (aiohttp.ClientConnectorCertificateError, ssl.SSLCertVerificationError)):
+                message = 'TLS 证书验证失败。请检查系统时间及代理、证书配置后重试。'
+            elif isinstance(error, asyncio.TimeoutError):
+                message = '连接或读取超时。请检查 ComfyUI 所在电脑的网络和代理后重试。'
+            elif isinstance(error, (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError)):
+                message = '无法连接代理或代理拒绝连接。请检查 ComfyUI 所用代理后重试。'
+            elif isinstance(error, (aiohttp.ClientSSLError, ssl.SSLError)):
+                message = 'TLS 连接失败。请检查网络或代理的 HTTPS 连接后重试。'
+            elif isinstance(error, (aiohttp.ClientConnectionError, ConnectionError)):
+                message = '连接被中断或无法连接模型服务器。请检查网络和代理后重试。'
+            elif isinstance(error, ValueError):
                 message = str(error)
             elif isinstance(error, OSError) and error.errno == 28:
                 message = '磁盘空间不足。'

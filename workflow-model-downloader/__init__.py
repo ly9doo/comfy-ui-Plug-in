@@ -38,7 +38,7 @@ def check_write(request):
 
 @routes.get('/workflow-model-download/jobs')
 async def list_jobs(request):
-    return web.json_response({'jobs': list(downloads.jobs.values()), 'version': '1.0'})
+    return web.json_response({'jobs': list(downloads.jobs.values()), 'version': '1.0.1'})
 
 
 @routes.post('/workflow-model-download/jobs')

@@ -3,8 +3,10 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import ssl
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -282,6 +284,60 @@ class DownloaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.root / self.model['name']).exists())
         restarted = module.ModelDownloads({'checkpoints': [self.root]}, self.central, self.base / 'history.json')
         self.assertEqual(restarted.jobs[job['id']]['state'], 'cancelled')
+
+    async def assert_failure_message(self, errors, expected):
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with patch.object(self.manager, 'transfer', side_effect=error):
+                    job = self.manager.enqueue([self.model])[0]
+                    await self.manager.tasks[job['id']]
+                self.assertEqual(job['state'], 'error')
+                self.assertIn(expected, job['error'])
+                self.assertNotIn('secret-token', job['error'])
+                self.assertNotIn('https://', job['error'])
+                self.assertFalse((self.root / self.model['name']).exists())
+                self.assertEqual(self.completed, [])
+
+    async def test_timeouts_report_network_timeout_without_remote_details(self):
+        await self.assert_failure_message([
+            asyncio.TimeoutError('https://cdn.example/file?token=secret-token'),
+            module.aiohttp.ServerTimeoutError('https://cdn.example/file?token=secret-token'),
+        ], '连接或读取超时')
+
+    async def test_proxy_failures_report_proxy_without_remote_details(self):
+        key = SimpleNamespace(host='proxy.example', port=7890, ssl=True)
+        await self.assert_failure_message([
+            module.aiohttp.ClientProxyConnectionError(key, ConnectionRefusedError(111, 'secret-token')),
+            module.aiohttp.ClientHttpProxyError(
+                SimpleNamespace(real_url='https://cdn.example/file?token=secret-token'), (),
+                status=502, message='secret-token'),
+        ], '无法连接代理或代理拒绝连接')
+
+    async def test_certificate_and_tls_errors_have_distinct_safe_messages(self):
+        key = SimpleNamespace(host='cdn.example', port=443, ssl=True, is_ssl=True)
+        await self.assert_failure_message([
+            module.aiohttp.ClientConnectorCertificateError(
+                key, ssl.SSLCertVerificationError(1, 'secret-token')),
+            ssl.SSLCertVerificationError(1, 'secret-token'),
+        ], 'TLS 证书验证失败')
+        await self.assert_failure_message([
+            module.aiohttp.ClientConnectorSSLError(key, ssl.SSLError(1, 'secret-token')),
+            ssl.SSLError(1, 'secret-token'),
+        ], 'TLS 连接失败')
+
+    async def test_connection_reset_and_connector_errors_hide_remote_details(self):
+        key = SimpleNamespace(host='cdn.example', port=443, ssl=True)
+        await self.assert_failure_message([
+            module.aiohttp.ClientConnectorError(key, ConnectionResetError(104, 'secret-token')),
+            module.aiohttp.ClientOSError(104, 'secret-token'),
+            ConnectionResetError(104, 'https://cdn.example/file?token=secret-token'),
+            module.aiohttp.ServerDisconnectedError('secret-token'),
+        ], '连接被中断或无法连接模型服务器')
+
+    async def test_existing_validation_disk_and_file_conflict_messages_are_preserved(self):
+        await self.assert_failure_message([ValueError('模型文件不完整，请重试。')], '模型文件不完整，请重试。')
+        await self.assert_failure_message([OSError(28, 'disk full')], '磁盘空间不足。')
+        await self.assert_failure_message([FileExistsError('already exists')], '同名文件已存在，未覆盖。')
 
 
 if __name__ == '__main__':
